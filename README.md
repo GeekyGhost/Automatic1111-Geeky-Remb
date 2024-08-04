@@ -2,6 +2,10 @@
 
 GeekyRemB is a powerful and versatile background removal extension for the Automatic1111 Stable Diffusion Web UI. It offers a wide range of features to help you create professional-quality images with removed or replaced backgrounds.
 
+<img width="1258" alt="Screenshot 2024-08-03 213048" src="https://github.com/user-attachments/assets/06e396a0-288c-4df7-a106-67a10a678047">
+
+<img width="1238" alt="Screenshot 2024-08-03 211134" src="https://github.com/user-attachments/assets/6a044919-4a0d-440d-bff6-fd4cfb8f508b">
+
 ## Features
 
 - **Multiple AI Models**: Choose from various background removal models, including u2net, u2netp, u2net_human_seg, u2net_cloth_seg, silueta, isnet-general-use, and isnet-anime.
