@@ -2,9 +2,13 @@
 
 GeekyRemB is a powerful and versatile background removal extension for the Automatic1111 Stable Diffusion Web UI. It offers a wide range of features to help you create professional-quality images with removed or replaced backgrounds.
 
-<img width="1258" alt="Screenshot 2024-08-03 213048" src="https://github.com/user-attachments/assets/06e396a0-288c-4df7-a106-67a10a678047">
+<img width="1250" alt="Screenshot 2024-08-03 213828" src="https://github.com/user-attachments/assets/4fffe121-2a97-4ab2-8850-9bc9895ac453">
 
-<img width="1238" alt="Screenshot 2024-08-03 211134" src="https://github.com/user-attachments/assets/6a044919-4a0d-440d-bff6-fd4cfb8f508b">
+<img width="1238" alt="Screenshot 2024-08-03 213847" src="https://github.com/user-attachments/assets/4f45bc33-5489-4078-bceb-1d7df94a6c5a">
+
+<img width="1238" alt="Screenshot 2024-08-03 213910" src="https://github.com/user-attachments/assets/e5d4329f-bd82-4a62-a30e-391ffa90aab0">
+
+<img width="1247" alt="Screenshot 2024-08-03 213927" src="https://github.com/user-attachments/assets/c2d24833-0407-460c-84b6-2f3370976d0a">
 
 ## Features
 
