@@ -1,0 +1,4 @@
+rembg
+numpy
+opencv-python
+Pillow
