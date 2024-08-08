@@ -1,5 +1,6 @@
 # GeekyRemB: Advanced Background Removal for Automatic1111 Web UI
 
+![download](https://github.com/user-attachments/assets/9a23a8aa-9ab8-4c6a-ae1a-44879b4a696d)
 
 ## Overview
 
