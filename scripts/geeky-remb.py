@@ -58,7 +58,8 @@ class GeekyRemB:
                           shadow_opacity=0.5, color_adjustment=False, brightness=1.0, contrast=1.0, 
                           saturation=1.0, x_position=0, y_position=0, rotation=0, opacity=1.0, 
                           flip_horizontal=False, flip_vertical=False, mask_blur=0, mask_expansion=0,
-                          foreground_scale=1.0, foreground_aspect_ratio=None, remove_bg=True):
+                          foreground_scale=1.0, foreground_aspect_ratio=None, remove_bg=True,
+                          custom_width=None, custom_height=None):
         if self.session is None or self.session.model_name != model:
             self.session = new_session(model)
 
@@ -96,6 +97,11 @@ class GeekyRemB:
         final_mask = self.process_mask(final_mask, invert_mask, feather_amount, mask_blur, mask_expansion)
 
         orig_width, orig_height = pil_image.size
+        if custom_width and custom_height:
+            output_width, output_height = custom_width, custom_height
+        else:
+            output_width, output_height = orig_width, orig_height
+
         new_width = int(orig_width * foreground_scale)
         if foreground_aspect_ratio is not None:
             new_height = int(new_width / foreground_aspect_ratio)
@@ -106,14 +112,14 @@ class GeekyRemB:
         fg_mask = Image.fromarray(final_mask).resize((new_width, new_height), Image.LANCZOS)
 
         if background_mode == "transparent":
-            result = Image.new("RGBA", (orig_width, orig_height), (0, 0, 0, 0))
+            result = Image.new("RGBA", (output_width, output_height), (0, 0, 0, 0))
         elif background_mode == "color":
-            result = Image.new("RGBA", (orig_width, orig_height), bg_color)
+            result = Image.new("RGBA", (output_width, output_height), bg_color)
         else:  # background_mode == "image"
             if background_image is not None:
-                result = background_image.resize((orig_width, orig_height), Image.LANCZOS).convert("RGBA")
+                result = background_image.resize((output_width, output_height), Image.LANCZOS).convert("RGBA")
             else:
-                result = Image.new("RGBA", (orig_width, orig_height), (0, 0, 0, 0))
+                result = Image.new("RGBA", (output_width, output_height), (0, 0, 0, 0))
 
         if flip_horizontal:
             fg_image = fg_image.transpose(Image.FLIP_LEFT_RIGHT)
@@ -125,8 +131,8 @@ class GeekyRemB:
         fg_image = fg_image.rotate(rotation, resample=Image.BICUBIC, expand=True)
         fg_mask = fg_mask.rotate(rotation, resample=Image.BICUBIC, expand=True)
 
-        paste_x = x_position + (orig_width - fg_image.width) // 2
-        paste_y = y_position + (orig_height - fg_image.height) // 2
+        paste_x = x_position + (output_width - fg_image.width) // 2
+        paste_y = y_position + (output_height - fg_image.height) // 2
 
         fg_rgba = fg_image.convert("RGBA")
         fg_with_opacity = Image.new("RGBA", fg_rgba.size, (0, 0, 0, 0))
@@ -142,13 +148,13 @@ class GeekyRemB:
         if edge_detection:
             edge_mask = cv2.Canny(np.array(fg_mask), 100, 200)
             edge_mask = cv2.dilate(edge_mask, np.ones((edge_thickness, edge_thickness), np.uint8), iterations=1)
-            edge_overlay = Image.new("RGBA", (orig_width, orig_height), (0, 0, 0, 0))
+            edge_overlay = Image.new("RGBA", (output_width, output_height), (0, 0, 0, 0))
             edge_overlay.paste(Image.new("RGB", fg_image.size, edge_color), (paste_x, paste_y), Image.fromarray(edge_mask))
             result = Image.alpha_composite(result, edge_overlay)
 
         if shadow:
             shadow_mask = fg_mask.filter(ImageFilter.GaussianBlur(shadow_blur))
-            shadow_image = Image.new("RGBA", (orig_width, orig_height), (0, 0, 0, 0))
+            shadow_image = Image.new("RGBA", (output_width, output_height), (0, 0, 0, 0))
             shadow_image.paste((0, 0, 0, int(255 * shadow_opacity)), (paste_x, paste_y), shadow_mask)
             result = Image.alpha_composite(result, shadow_image.filter(ImageFilter.GaussianBlur(shadow_blur)))
 
@@ -170,7 +176,7 @@ class GeekyRemB:
         processed_frame, _ = self.remove_background(pil_frame, *args)
         return cv2.cvtColor(np.array(processed_frame), cv2.COLOR_RGB2BGR)
 
-    def process_video(self, input_path, output_path, *args):
+    def process_video(self, input_path, output_path, background_video_path, *args):
         cap = cv2.VideoCapture(input_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -181,14 +187,31 @@ class GeekyRemB:
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        for _ in tqdm(range(total_frames), desc="Processing video"):
+        if background_video_path:
+            bg_cap = cv2.VideoCapture(background_video_path)
+            bg_total_frames = int(bg_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        for frame_num in tqdm(range(total_frames), desc="Processing video"):
             ret, frame = cap.read()
             if not ret:
                 break
+            
+            if background_video_path:
+                bg_frame_num = frame_num % bg_total_frames
+                bg_cap.set(cv2.CAP_PROP_POS_FRAMES, bg_frame_num)
+                bg_ret, bg_frame = bg_cap.read()
+                if bg_ret:
+                    bg_frame_resized = cv2.resize(bg_frame, (width, height))
+                    args = list(args)
+                    args[9] = Image.fromarray(cv2.cvtColor(bg_frame_resized, cv2.COLOR_BGR2RGB))
+                    args = tuple(args)
+            
             processed_frame = self.process_frame(frame, *args)
             out.write(processed_frame)
 
         cap.release()
+        if background_video_path:
+            bg_cap.release()
         out.release()
 
         # Convert output video to MP4 container
@@ -226,9 +249,10 @@ def on_ui_tabs():
                 with gr.Group():
                     gr.Markdown("### Background Options")
                     remove_background = gr.Checkbox(label="Remove Background", value=True)
-                    background_mode = gr.Radio(label="Background Mode", choices=["transparent", "color", "image"], value="transparent")
+                    background_mode = gr.Radio(label="Background Mode", choices=["transparent", "color", "image", "video"], value="transparent")
                     background_color = gr.ColorPicker(label="Background Color", value="#000000", visible=False)
                     background_image = gr.Image(label="Background Image", type="pil", visible=False)
+                    background_video = gr.Video(label="Background Video", visible=False)
 
         with gr.Accordion("Advanced Settings", open=False):
             with gr.Row():
@@ -269,6 +293,9 @@ def on_ui_tabs():
                 image_format = gr.Dropdown(label="Image Format", choices=["PNG", "JPEG", "WEBP"], value="PNG")
                 video_format = gr.Dropdown(label="Video Format", choices=["MP4", "AVI", "MOV"], value="MP4")
                 video_quality = gr.Slider(label="Video Quality", minimum=0, maximum=100, value=95, step=1)
+                use_custom_dimensions = gr.Checkbox(label="Use Custom Dimensions", value=False)
+                custom_width = gr.Number(label="Custom Width", value=512, visible=False)
+                custom_height = gr.Number(label="Custom Height", value=512, visible=False)
 
         run_button = gr.Button(label="Run GeekyRemB")
 
@@ -288,6 +315,13 @@ def on_ui_tabs():
             return {
                 background_color: gr.update(visible=mode == "color"),
                 background_image: gr.update(visible=mode == "image"),
+                background_video: gr.update(visible=mode == "video"),
+            }
+
+        def update_custom_dimensions(use_custom):
+            return {
+                custom_width: gr.update(visible=use_custom),
+                custom_height: gr.update(visible=use_custom),
             }
 
         def process_image(image, *args):
@@ -295,21 +329,22 @@ def on_ui_tabs():
             result, _ = geeky_remb.remove_background(image, *args)
             return result
 
-        def process_video(video_path, *args):
+        def process_video(video_path, background_video_path, *args):
             geeky_remb = GeekyRemB()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
                 output_path = temp_file.name
-            geeky_remb.process_video(video_path, output_path, *args)
+            geeky_remb.process_video(video_path, output_path, background_video_path, *args)
             return output_path
 
         def run_geeky_remb(input_type, foreground_input, foreground_video, result_type, model, output_format, 
                            alpha_matting, alpha_matting_foreground_threshold, alpha_matting_background_threshold, 
                            post_process_mask, chroma_key, chroma_threshold, color_tolerance, background_mode, 
-                           background_color, background_image, invert_mask, feather_amount, 
+                           background_color, background_image, background_video, invert_mask, feather_amount, 
                            edge_detection, edge_thickness, edge_color, shadow, shadow_blur, shadow_opacity, 
                            color_adjustment, brightness, contrast, saturation, x_position, y_position, rotation, 
                            opacity, flip_horizontal, flip_vertical, mask_blur, mask_expansion, foreground_scale, 
-                           foreground_aspect_ratio, remove_background, image_format, video_format, video_quality):
+                           foreground_aspect_ratio, remove_background, image_format, video_format, video_quality,
+                           use_custom_dimensions, custom_width, custom_height):
             
             args = (model, alpha_matting, alpha_matting_foreground_threshold,
                     alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
@@ -319,6 +354,11 @@ def on_ui_tabs():
                     y_position, rotation, opacity, flip_horizontal, flip_vertical, mask_blur,
                     mask_expansion, foreground_scale, foreground_aspect_ratio, remove_background)
 
+            if use_custom_dimensions:
+                args += (custom_width, custom_height)
+            else:
+                args += (None, None)
+
             if input_type == "Image" and result_type == "Image":
                 result = process_image(foreground_input, *args)
                 if image_format != "PNG":
@@ -327,7 +367,7 @@ def on_ui_tabs():
                     result.save(temp_file.name, format=image_format, quality=95 if image_format == "JPEG" else None)
                     return temp_file.name, None
             elif input_type == "Video" and result_type == "Video":
-                output_video = process_video(foreground_video, *args)
+                output_video = process_video(foreground_video, background_video if background_mode == "video" else None, *args)
                 if video_format != "MP4":
                     temp_output = output_video + f"_temp.{video_format.lower()}"
                     os.system(f"ffmpeg -i {output_video} -c:v libx264 -crf {int(20 - (video_quality / 5))} {temp_output}")
@@ -344,7 +384,7 @@ def on_ui_tabs():
                 for _ in range(24 * 5):  # 5 seconds at 24 fps
                     out.write(frame)
                 out.release()
-                return None, process_video(output_path, *args)
+                return None, process_video(output_path, background_video if background_mode == "video" else None, *args)
             elif input_type == "Video" and result_type == "Image":
                 cap = cv2.VideoCapture(foreground_video)
                 ret, frame = cap.read()
@@ -362,7 +402,8 @@ def on_ui_tabs():
 
         input_type.change(update_input_type, inputs=[input_type], outputs=[foreground_input, foreground_video])
         result_type.change(update_output_type, inputs=[result_type], outputs=[result_image, result_video])
-        background_mode.change(update_background_mode, inputs=[background_mode], outputs=[background_color, background_image])
+        background_mode.change(update_background_mode, inputs=[background_mode], outputs=[background_color, background_image, background_video])
+        use_custom_dimensions.change(update_custom_dimensions, inputs=[use_custom_dimensions], outputs=[custom_width, custom_height])
 
         run_button.click(
             fn=run_geeky_remb,
@@ -370,12 +411,13 @@ def on_ui_tabs():
                 input_type, foreground_input, foreground_video, result_type,
                 model, output_format, alpha_matting, alpha_matting_foreground_threshold,
                 alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
-                color_tolerance, background_mode, background_color, background_image,
+                color_tolerance, background_mode, background_color, background_image, background_video,
                 invert_mask, feather_amount, edge_detection, edge_thickness, edge_color,
                 shadow, shadow_blur, shadow_opacity, color_adjustment, brightness, contrast,
                 saturation, x_position, y_position, rotation, opacity, flip_horizontal,
                 flip_vertical, mask_blur, mask_expansion, foreground_scale, foreground_aspect_ratio,
-                remove_background, image_format, video_format, video_quality
+                remove_background, image_format, video_format, video_quality,
+                use_custom_dimensions, custom_width, custom_height
             ],
             outputs=[result_image, result_video]
         )
