@@ -191,6 +191,12 @@ class GeekyRemB:
         cap.release()
         out.release()
 
+        # Convert output video to MP4 container
+        temp_output = output_path + "_temp.mp4"
+        os.rename(output_path, temp_output)
+        os.system(f"ffmpeg -i {temp_output} -c copy {output_path}")
+        os.remove(temp_output)
+
 def on_ui_tabs():
     with gr.Blocks(analytics_enabled=False) as geeky_remb_tab:
         gr.Markdown("# GeekyRemB: Background Removal and Image/Video Manipulation")
@@ -258,12 +264,24 @@ def on_ui_tabs():
                     mask_blur = gr.Slider(label="Mask Blur", minimum=0, maximum=100, value=0, step=1)
                     mask_expansion = gr.Slider(label="Mask Expansion", minimum=-100, maximum=100, value=0, step=1)
 
+            with gr.Row():
+                gr.Markdown("### Output Settings")
+                image_format = gr.Dropdown(label="Image Format", choices=["PNG", "JPEG", "WEBP"], value="PNG")
+                video_format = gr.Dropdown(label="Video Format", choices=["MP4", "AVI", "MOV"], value="MP4")
+                video_quality = gr.Slider(label="Video Quality", minimum=0, maximum=100, value=95, step=1)
+
         run_button = gr.Button(label="Run GeekyRemB")
 
         def update_input_type(choice):
             return {
                 foreground_input: gr.update(visible=choice == "Image"),
                 foreground_video: gr.update(visible=choice == "Video"),
+            }
+
+        def update_output_type(choice):
+            return {
+                result_image: gr.update(visible=choice == "Image"),
+                result_video: gr.update(visible=choice == "Video"),
             }
 
         def update_background_mode(mode):
@@ -291,7 +309,7 @@ def on_ui_tabs():
                            edge_detection, edge_thickness, edge_color, shadow, shadow_blur, shadow_opacity, 
                            color_adjustment, brightness, contrast, saturation, x_position, y_position, rotation, 
                            opacity, flip_horizontal, flip_vertical, mask_blur, mask_expansion, foreground_scale, 
-                           foreground_aspect_ratio, remove_background):
+                           foreground_aspect_ratio, remove_background, image_format, video_format, video_quality):
             
             args = (model, alpha_matting, alpha_matting_foreground_threshold,
                     alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
@@ -302,12 +320,21 @@ def on_ui_tabs():
                     mask_expansion, foreground_scale, foreground_aspect_ratio, remove_background)
 
             if input_type == "Image" and result_type == "Image":
-                return process_image(foreground_input, *args), None
+                result = process_image(foreground_input, *args)
+                if image_format != "PNG":
+                    result = result.convert("RGB")
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{image_format.lower()}") as temp_file:
+                    result.save(temp_file.name, format=image_format, quality=95 if image_format == "JPEG" else None)
+                    return temp_file.name, None
             elif input_type == "Video" and result_type == "Video":
                 output_video = process_video(foreground_video, *args)
+                if video_format != "MP4":
+                    temp_output = output_video + f"_temp.{video_format.lower()}"
+                    os.system(f"ffmpeg -i {output_video} -c:v libx264 -crf {int(20 - (video_quality / 5))} {temp_output}")
+                    os.remove(output_video)
+                    output_video = temp_output
                 return None, output_video
             elif input_type == "Image" and result_type == "Video":
-                # Create a video from the image
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
                     output_path = temp_file.name
                 frame = cv2.cvtColor(np.array(foreground_input), cv2.COLOR_RGB2BGR)
@@ -319,17 +346,22 @@ def on_ui_tabs():
                 out.release()
                 return None, process_video(output_path, *args)
             elif input_type == "Video" and result_type == "Image":
-                # Extract the first frame from the video
                 cap = cv2.VideoCapture(foreground_video)
                 ret, frame = cap.read()
                 cap.release()
                 if ret:
                     pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                    return process_image(pil_frame, *args), None
+                    result = process_image(pil_frame, *args)
+                    if image_format != "PNG":
+                        result = result.convert("RGB")
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{image_format.lower()}") as temp_file:
+                        result.save(temp_file.name, format=image_format, quality=95 if image_format == "JPEG" else None)
+                        return temp_file.name, None
                 else:
                     return None, None
 
         input_type.change(update_input_type, inputs=[input_type], outputs=[foreground_input, foreground_video])
+        result_type.change(update_output_type, inputs=[result_type], outputs=[result_image, result_video])
         background_mode.change(update_background_mode, inputs=[background_mode], outputs=[background_color, background_image])
 
         run_button.click(
@@ -343,7 +375,7 @@ def on_ui_tabs():
                 shadow, shadow_blur, shadow_opacity, color_adjustment, brightness, contrast,
                 saturation, x_position, y_position, rotation, opacity, flip_horizontal,
                 flip_vertical, mask_blur, mask_expansion, foreground_scale, foreground_aspect_ratio,
-                remove_background
+                remove_background, image_format, video_format, video_quality
             ],
             outputs=[result_image, result_video]
         )
