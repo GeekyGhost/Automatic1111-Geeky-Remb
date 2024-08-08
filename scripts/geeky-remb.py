@@ -50,16 +50,17 @@ class GeekyRemB:
 
         return mask
 
-    def remove_background(self, image, model, alpha_matting, alpha_matting_foreground_threshold, 
+    def remove_background(self, image, background_image, model, alpha_matting, alpha_matting_foreground_threshold, 
                           alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
-                          color_tolerance, background_mode, background_color, background_image, output_format="RGBA", 
+                          color_tolerance, background_mode, background_color, output_format="RGBA", 
                           invert_mask=False, feather_amount=0, edge_detection=False, 
                           edge_thickness=1, edge_color="#FFFFFF", shadow=False, shadow_blur=5, 
                           shadow_opacity=0.5, color_adjustment=False, brightness=1.0, contrast=1.0, 
                           saturation=1.0, x_position=0, y_position=0, rotation=0, opacity=1.0, 
                           flip_horizontal=False, flip_vertical=False, mask_blur=0, mask_expansion=0,
                           foreground_scale=1.0, foreground_aspect_ratio=None, remove_bg=True,
-                          custom_width=None, custom_height=None):
+                          use_custom_dimensions=False, custom_width=None, custom_height=None,
+                          output_dimension_source="Foreground"):
         if self.session is None or self.session.model_name != model:
             self.session = new_session(model)
 
@@ -97,8 +98,12 @@ class GeekyRemB:
         final_mask = self.process_mask(final_mask, invert_mask, feather_amount, mask_blur, mask_expansion)
 
         orig_width, orig_height = pil_image.size
-        if custom_width and custom_height:
-            output_width, output_height = custom_width, custom_height
+        bg_width, bg_height = background_image.size if background_image else (orig_width, orig_height)
+
+        if use_custom_dimensions and custom_width and custom_height:
+            output_width, output_height = int(custom_width), int(custom_height)
+        elif output_dimension_source == "Background" and background_image:
+            output_width, output_height = bg_width, bg_height
         else:
             output_width, output_height = orig_width, orig_height
 
@@ -203,7 +208,7 @@ class GeekyRemB:
                 if bg_ret:
                     bg_frame_resized = cv2.resize(bg_frame, (width, height))
                     args = list(args)
-                    args[9] = Image.fromarray(cv2.cvtColor(bg_frame_resized, cv2.COLOR_BGR2RGB))
+                    args[1] = Image.fromarray(cv2.cvtColor(bg_frame_resized, cv2.COLOR_BGR2RGB))
                     args = tuple(args)
             
             processed_frame = self.process_frame(frame, *args)
@@ -296,6 +301,12 @@ def on_ui_tabs():
                 use_custom_dimensions = gr.Checkbox(label="Use Custom Dimensions", value=False)
                 custom_width = gr.Number(label="Custom Width", value=512, visible=False)
                 custom_height = gr.Number(label="Custom Height", value=512, visible=False)
+                output_dimension_source = gr.Radio(
+                    label="Output Dimension Source",
+                    choices=["Foreground", "Background"],
+                    value="Foreground",
+                    visible=True
+                )
 
         run_button = gr.Button(label="Run GeekyRemB")
 
@@ -322,11 +333,12 @@ def on_ui_tabs():
             return {
                 custom_width: gr.update(visible=use_custom),
                 custom_height: gr.update(visible=use_custom),
+                output_dimension_source: gr.update(visible=not use_custom)
             }
 
-        def process_image(image, *args):
+        def process_image(image, background_image, *args):
             geeky_remb = GeekyRemB()
-            result, _ = geeky_remb.remove_background(image, *args)
+            result, _ = geeky_remb.remove_background(image, background_image, *args)
             return result
 
         def process_video(video_path, background_video_path, *args):
@@ -344,23 +356,19 @@ def on_ui_tabs():
                            color_adjustment, brightness, contrast, saturation, x_position, y_position, rotation, 
                            opacity, flip_horizontal, flip_vertical, mask_blur, mask_expansion, foreground_scale, 
                            foreground_aspect_ratio, remove_background, image_format, video_format, video_quality,
-                           use_custom_dimensions, custom_width, custom_height):
+                           use_custom_dimensions, custom_width, custom_height, output_dimension_source):
             
             args = (model, alpha_matting, alpha_matting_foreground_threshold,
                     alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
-                    color_tolerance, background_mode, background_color, background_image, output_format,
+                    color_tolerance, background_mode, background_color, output_format,
                     invert_mask, feather_amount, edge_detection, edge_thickness, edge_color, shadow, shadow_blur,
                     shadow_opacity, color_adjustment, brightness, contrast, saturation, x_position,
                     y_position, rotation, opacity, flip_horizontal, flip_vertical, mask_blur,
-                    mask_expansion, foreground_scale, foreground_aspect_ratio, remove_background)
-
-            if use_custom_dimensions:
-                args += (custom_width, custom_height)
-            else:
-                args += (None, None)
+                    mask_expansion, foreground_scale, foreground_aspect_ratio, remove_background,
+                    use_custom_dimensions, custom_width, custom_height, output_dimension_source)
 
             if input_type == "Image" and result_type == "Image":
-                result = process_image(foreground_input, *args)
+                result = process_image(foreground_input, background_image, *args)
                 if image_format != "PNG":
                     result = result.convert("RGB")
                 with tempfile.NamedTemporaryFile(delete=False, suffix=f".{image_format.lower()}") as temp_file:
@@ -391,7 +399,7 @@ def on_ui_tabs():
                 cap.release()
                 if ret:
                     pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                    result = process_image(pil_frame, *args)
+                    result = process_image(pil_frame, background_image, *args)
                     if image_format != "PNG":
                         result = result.convert("RGB")
                     with tempfile.NamedTemporaryFile(delete=False, suffix=f".{image_format.lower()}") as temp_file:
@@ -403,7 +411,7 @@ def on_ui_tabs():
         input_type.change(update_input_type, inputs=[input_type], outputs=[foreground_input, foreground_video])
         result_type.change(update_output_type, inputs=[result_type], outputs=[result_image, result_video])
         background_mode.change(update_background_mode, inputs=[background_mode], outputs=[background_color, background_image, background_video])
-        use_custom_dimensions.change(update_custom_dimensions, inputs=[use_custom_dimensions], outputs=[custom_width, custom_height])
+        use_custom_dimensions.change(update_custom_dimensions, inputs=[use_custom_dimensions], outputs=[custom_width, custom_height, output_dimension_source])
 
         run_button.click(
             fn=run_geeky_remb,
@@ -417,7 +425,7 @@ def on_ui_tabs():
                 saturation, x_position, y_position, rotation, opacity, flip_horizontal,
                 flip_vertical, mask_blur, mask_expansion, foreground_scale, foreground_aspect_ratio,
                 remove_background, image_format, video_format, video_quality,
-                use_custom_dimensions, custom_width, custom_height
+                use_custom_dimensions, custom_width, custom_height, output_dimension_source
             ],
             outputs=[result_image, result_video]
         )
