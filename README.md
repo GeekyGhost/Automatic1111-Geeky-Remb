@@ -68,6 +68,10 @@ The aspect ratio is applied before positioning (X and Y position) and rotation.
 If you're using a background image, you might want to consider its aspect ratio when setting the foreground aspect ratio for a cohesive look.
 
 
+<img width="1249" alt="Screenshot 2024-08-18 230754" src="https://github.com/user-attachments/assets/a876427e-30b1-42fa-b0d0-ff1d41cb6aa6">
+
+
+
 
 ![download](https://github.com/user-attachments/assets/9a23a8aa-9ab8-4c6a-ae1a-44879b4a696d)
 
