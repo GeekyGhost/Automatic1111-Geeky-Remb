@@ -253,4 +253,6 @@ To things that may come
 
 <img width="1245" alt="Screenshot 2024-08-18 234435" src="https://github.com/user-attachments/assets/86a720ad-a0e3-4c86-8fed-d90e60d62a50">
 
+<img width="1256" alt="Screenshot 2024-08-18 234617" src="https://github.com/user-attachments/assets/d92bc8a8-1393-4b49-9de3-a4375239613f">
+<img width="1234" alt="Screenshot 2024-08-18 234630" src="https://github.com/user-attachments/assets/5c2e8039-94b5-4d2a-904a-7b87b07ac578">
 
