@@ -244,3 +244,13 @@ GeekyRemB is built upon the excellent [rembg](https://github.com/danielgatis/rem
 
 
 We hope you enjoy using GeekyRemB to create stunning images with ease! If you find it useful, consider starring the repository and sharing it with your friends and colleagues.
+
+The gap that allows for full and free rotation will become important later, for right now it's a fun and useful ediging feature, in the future it's going to allow for something pretty neat with animation. 
+
+![image (3)](https://github.com/user-attachments/assets/d1bee6f4-b558-46c1-8541-571af0e1a997)
+
+To things that may come
+
+<img width="1245" alt="Screenshot 2024-08-18 234435" src="https://github.com/user-attachments/assets/86a720ad-a0e3-4c86-8fed-d90e60d62a50">
+
+
