@@ -1,5 +1,74 @@
 # GeekyRemB: Advanced Background Removal for Automatic1111 Web UI
 
+update 8/18/2024 
+
+Key Updates to the Code:
+
+New Methods in GeekyRemB Class:
+a) parse_aspect_ratio(self, aspect_ratio_input):
+This method interprets the user's aspect ratio input. It can handle:
+
+Ratio strings (e.g., "16:9")
+Decimal values (e.g., "1.77")
+Standard terms (e.g., "portrait", "landscape")
+
+b) calculate_new_dimensions(self, orig_width, orig_height, scale, aspect_ratio):
+This method calculates the new dimensions based on the original size, scale, and aspect ratio.
+Updated remove_background Method:
+The method now uses parse_aspect_ratio and calculate_new_dimensions to determine the new image dimensions.
+UI Changes:
+The foreground_aspect_ratio input is now a gr.Textbox with a more descriptive placeholder, allowing for more flexible input.
+
+How to Use the New Aspect Ratio Feature:
+
+Basic Usage:
+In the "Foreground Adjustments" section, you'll find an input field labeled "Aspect Ratio". Here are the ways you can use it:
+a) Leave it blank: This will maintain the original aspect ratio of your image.
+b) Enter a ratio: You can input ratios like "16:9", "4:3", "1:1", etc. The format is "width:height".
+c) Use decimal values: You can enter a single number representing width divided by height, e.g., "1.77" for 16:9.
+d) Use standard terms: You can enter "portrait", "landscape", or "square".
+Examples:
+
+For a widescreen format, enter "16:9"
+For a traditional TV format, enter "4:3"
+For a square image, enter "1:1" or "square"
+For a vertical video format, you might enter "9:16"
+For a slight landscape format, you could enter "1.2" (which is equivalent to 6:5)
+
+
+Combining with Scale:
+The aspect ratio works in conjunction with the "Scale" slider. Here's how they interact:
+
+Scale determines the overall size of the image relative to its original size.
+Aspect ratio determines the shape of the image.
+
+For example:
+
+If you set scale to 1.5 and aspect ratio to "16:9", the image will be enlarged by 50% and shaped to a 16:9 ratio.
+If you set scale to 0.5 and aspect ratio to "1:1", the image will be shrunk by 50% and made square.
+
+
+Special Considerations:
+
+If you enter an invalid aspect ratio, the script will default to maintaining the original aspect ratio.
+The aspect ratio is applied before other transformations like rotation or flipping.
+When using custom terms like "portrait" or "landscape", the script uses preset ratios (3:4 for portrait, 4:3 for landscape).
+
+
+Tips for Best Results:
+
+For precise control, use numeric ratios (like "16:9") rather than terms like "landscape".
+If you're targeting a specific output size, you may need to experiment with both the scale and aspect ratio settings.
+Remember that extreme changes in aspect ratio might distort your image, especially if it contains people or recognizable objects.
+
+
+Interaction with Other Features:
+
+The aspect ratio is applied before positioning (X and Y position) and rotation.
+If you're using a background image, you might want to consider its aspect ratio when setting the foreground aspect ratio for a cohesive look.
+
+
+
 ![download](https://github.com/user-attachments/assets/9a23a8aa-9ab8-4c6a-ae1a-44879b4a696d)
 
 ## Overview
