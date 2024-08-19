@@ -50,6 +50,44 @@ class GeekyRemB:
 
         return mask
 
+    def parse_aspect_ratio(self, aspect_ratio_input):
+        if not aspect_ratio_input:
+            return None
+        
+        if ':' in aspect_ratio_input:
+            try:
+                w, h = map(float, aspect_ratio_input.split(':'))
+                return w / h
+            except ValueError:
+                return None
+        
+        try:
+            return float(aspect_ratio_input)
+        except ValueError:
+            pass
+
+        standard_ratios = {
+            '4:3': 4/3,
+            '16:9': 16/9,
+            '21:9': 21/9,
+            '1:1': 1,
+            'square': 1,
+            'portrait': 3/4,
+            'landscape': 4/3
+        }
+        
+        return standard_ratios.get(aspect_ratio_input.lower())
+
+    def calculate_new_dimensions(self, orig_width, orig_height, scale, aspect_ratio):
+        new_width = int(orig_width * scale)
+        
+        if aspect_ratio is None:
+            new_height = int(orig_height * scale)
+        else:
+            new_height = int(new_width / aspect_ratio)
+        
+        return new_width, new_height
+
     def remove_background(self, image, background_image, model, alpha_matting, alpha_matting_foreground_threshold, 
                           alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
                           color_tolerance, background_mode, background_color, output_format="RGBA", 
@@ -85,7 +123,7 @@ class GeekyRemB:
                 alpha_matting_background_threshold=alpha_matting_background_threshold,
                 post_process_mask=post_process_mask,
             )
-            rembg_mask = np.array(removed_bg)[:,:,3]
+            rembg_mask = np.array(removed_bg)[:, :, 3]
         else:
             removed_bg = pil_image.convert("RGBA")
             rembg_mask = np.full(pil_image.size[::-1], 255, dtype=np.uint8)
@@ -107,11 +145,8 @@ class GeekyRemB:
         else:
             output_width, output_height = orig_width, orig_height
 
-        new_width = int(orig_width * foreground_scale)
-        if foreground_aspect_ratio is not None:
-            new_height = int(new_width / foreground_aspect_ratio)
-        else:
-            new_height = int(orig_height * foreground_scale)
+        aspect_ratio = self.parse_aspect_ratio(foreground_aspect_ratio)
+        new_width, new_height = self.calculate_new_dimensions(orig_width, orig_height, foreground_scale, aspect_ratio)
 
         fg_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
         fg_mask = Image.fromarray(final_mask).resize((new_width, new_height), Image.LANCZOS)
@@ -225,6 +260,7 @@ class GeekyRemB:
         os.system(f"ffmpeg -i {temp_output} -c copy {output_path}")
         os.remove(temp_output)
 
+
 def on_ui_tabs():
     with gr.Blocks(analytics_enabled=False) as geeky_remb_tab:
         gr.Markdown("# GeekyRemB: Background Removal and Image/Video Manipulation")
@@ -234,11 +270,16 @@ def on_ui_tabs():
                 input_type = gr.Radio(["Image", "Video"], label="Input Type", value="Image")
                 foreground_input = gr.Image(label="Foreground Image", type="pil", visible=True)
                 foreground_video = gr.Video(label="Foreground Video", visible=False)
-                
+                run_button = gr.Button(label="Run GeekyRemB")
+
                 with gr.Group():
                     gr.Markdown("### Foreground Adjustments")
                     foreground_scale = gr.Slider(label="Scale", minimum=0.1, maximum=5.0, value=1.0, step=0.1)
-                    foreground_aspect_ratio = gr.Slider(label="Aspect Ratio", minimum=0.1, maximum=10.0, value=1.0, step=0.1)
+                    foreground_aspect_ratio = gr.Textbox(
+                        label="Aspect Ratio",
+                        placeholder="e.g., 16:9, 4:3, 1:1, portrait, landscape, or leave blank for original",
+                        value=""
+                    )
                     x_position = gr.Slider(label="X Position", minimum=-1000, maximum=1000, value=0, step=1)
                     y_position = gr.Slider(label="Y Position", minimum=-1000, maximum=1000, value=0, step=1)
                     rotation = gr.Slider(label="Rotation", minimum=-360, maximum=360, value=0, step=0.1)
@@ -307,8 +348,6 @@ def on_ui_tabs():
                     value="Foreground",
                     visible=True
                 )
-
-        run_button = gr.Button(label="Run GeekyRemB")
 
         def update_input_type(choice):
             return {
@@ -431,5 +470,6 @@ def on_ui_tabs():
         )
 
     return [(geeky_remb_tab, "GeekyRemB", "geeky_remb_tab")]
+
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
