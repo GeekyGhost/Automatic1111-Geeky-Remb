@@ -2,3 +2,5 @@ rembg
 numpy
 opencv-python
 Pillow
+onnxruntime-gpu
+onnxruntime
