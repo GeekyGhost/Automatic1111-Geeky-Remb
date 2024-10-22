@@ -5,14 +5,21 @@ from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 import cv2
 from tqdm import tqdm
 import gradio as gr
-from modules import script_callbacks, shared
+from modules import script_callbacks, shared, scripts
+from modules.paths_internal import models_path
+from modules.ui_components import FormRow
+from modules.processing import StableDiffusionProcessing
+from modules.images import save_image
 import torch
 import tempfile
 
 class GeekyRemB:
     def __init__(self):
         self.session = None
-
+        if "U2NET_HOME" not in os.environ:
+            os.environ["U2NET_HOME"] = os.path.join(models_path, "u2net")
+        self.processing = False
+        
     def apply_chroma_key(self, image, color, threshold, color_tolerance=20):
         hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
         if color == "green":
