@@ -1,17 +1,103 @@
 import os
 import numpy as np
 from rembg import remove, new_session
-from PIL import Image, ImageOps, ImageFilter, ImageEnhance
+from PIL import Image, ImageOps, ImageFilter, ImageEnhance, ImageColor
 import cv2
 from tqdm import tqdm
 import gradio as gr
 from modules import script_callbacks, shared, scripts
 from modules.paths_internal import models_path
-from modules.ui_components import FormRow
 from modules.processing import StableDiffusionProcessing
 from modules.images import save_image
 import torch
 import tempfile
+
+class BlendMode:
+    @staticmethod
+    def _ensure_same_channels(target, blend):
+        """Ensure both images have the same number of channels"""
+        if target.shape[-1] == 4 and blend.shape[-1] == 3:
+            alpha = np.ones((*blend.shape[:2], 1))
+            blend = np.concatenate([blend, alpha], axis=-1)
+        elif target.shape[-1] == 3 and blend.shape[-1] == 4:
+            alpha = np.ones((*target.shape[:2], 1))
+            target = np.concatenate([target, alpha], axis=-1)
+        return target, blend
+
+    @staticmethod
+    def _apply_blend(target, blend, operation, opacity=1.0):
+        """Apply blend operation with proper alpha handling"""
+        target, blend = BlendMode._ensure_same_channels(target, blend)
+        
+        target_rgb = target[..., :3]
+        blend_rgb = blend[..., :3]
+        
+        target_a = target[..., 3:] if target.shape[-1] == 4 else 1
+        blend_a = blend[..., 3:] if blend.shape[-1] == 4 else 1
+        
+        result_rgb = operation(target_rgb, blend_rgb)
+        result_a = target_a * blend_a
+        
+        result_rgb = result_rgb * opacity + target_rgb * (1 - opacity)
+        result_a = result_a * opacity + target_a * (1 - opacity)
+        
+        return np.concatenate([result_rgb, result_a], axis=-1) if target.shape[-1] == 4 else result_rgb
+
+    @staticmethod
+    def normal(target, blend, opacity=1.0):
+        return BlendMode._apply_blend(target, blend, lambda t, b: b, opacity)
+    
+    @staticmethod
+    def multiply(target, blend, opacity=1.0):
+        return BlendMode._apply_blend(target, blend, lambda t, b: t * b, opacity)
+    
+    @staticmethod
+    def screen(target, blend, opacity=1.0):
+        return BlendMode._apply_blend(target, blend, lambda t, b: 1 - (1 - t) * (1 - b), opacity)
+    
+    @staticmethod
+    def overlay(target, blend, opacity=1.0):
+        def overlay_op(t, b):
+            return np.where(t > 0.5,
+                          1 - 2 * (1 - t) * (1 - b),
+                          2 * t * b)
+        return BlendMode._apply_blend(target, blend, overlay_op, opacity)
+    
+    @staticmethod
+    def soft_light(target, blend, opacity=1.0):
+        def soft_light_op(t, b):
+            return np.where(b > 0.5,
+                          t + (2 * b - 1) * (t - t * t),
+                          t - (1 - 2 * b) * t * (1 - t))
+        return BlendMode._apply_blend(target, blend, soft_light_op, opacity)
+    
+    @staticmethod
+    def hard_light(target, blend, opacity=1.0):
+        def hard_light_op(t, b):
+            return np.where(b > 0.5,
+                          1 - (1 - t) * (2 - 2 * b),
+                          2 * t * b)
+        return BlendMode._apply_blend(target, blend, hard_light_op, opacity)
+    
+    @staticmethod
+    def difference(target, blend, opacity=1.0):
+        return BlendMode._apply_blend(target, blend, lambda t, b: np.abs(t - b), opacity)
+    
+    @staticmethod
+    def exclusion(target, blend, opacity=1.0):
+        return BlendMode._apply_blend(target, blend, lambda t, b: t + b - 2 * t * b, opacity)
+    
+    @staticmethod
+    def color_dodge(target, blend, opacity=1.0):
+        def color_dodge_op(t, b):
+            return np.where(b >= 1, 1, np.minimum(1, t / (1 - b + 1e-6)))
+        return BlendMode._apply_blend(target, blend, color_dodge_op, opacity)
+    
+    @staticmethod
+    def color_burn(target, blend, opacity=1.0):
+        def color_burn_op(t, b):
+            return np.where(b <= 0, 0, np.maximum(0, 1 - (1 - t) / (b + 1e-6)))
+        return BlendMode._apply_blend(target, blend, color_burn_op, opacity)
 
 class GeekyRemB:
     def __init__(self):
@@ -19,8 +105,34 @@ class GeekyRemB:
         if "U2NET_HOME" not in os.environ:
             os.environ["U2NET_HOME"] = os.path.join(models_path, "u2net")
         self.processing = False
+        self.blend_modes = {
+            "normal": BlendMode.normal,
+            "multiply": BlendMode.multiply,
+            "screen": BlendMode.screen,
+            "overlay": BlendMode.overlay,
+            "soft_light": BlendMode.soft_light,
+            "hard_light": BlendMode.hard_light,
+            "difference": BlendMode.difference,
+            "exclusion": BlendMode.exclusion,
+            "color_dodge": BlendMode.color_dodge,
+            "color_burn": BlendMode.color_burn
+        }
+
+    def apply_blend_mode(self, target, blend, mode="normal", opacity=1.0):
+        if mode not in self.blend_modes:
+            return blend
         
+        target = target.astype(np.float32) / 255
+        blend = blend.astype(np.float32) / 255
+        
+        result = self.blend_modes[mode](target, blend, opacity)
+        
+        return np.clip(result * 255, 0, 255).astype(np.uint8)
+
     def apply_chroma_key(self, image, color, threshold, color_tolerance=20):
+        if isinstance(image, Image.Image):
+            image = np.array(image)
+            
         hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
         if color == "green":
             lower = np.array([40 - color_tolerance, 40, 40])
@@ -105,12 +217,22 @@ class GeekyRemB:
                           flip_horizontal=False, flip_vertical=False, mask_blur=0, mask_expansion=0,
                           foreground_scale=1.0, foreground_aspect_ratio=None, remove_bg=True,
                           use_custom_dimensions=False, custom_width=None, custom_height=None,
-                          output_dimension_source="Foreground"):
+                          output_dimension_source="Foreground", blend_mode="normal"):
         if self.session is None or self.session.model_name != model:
             self.session = new_session(model)
 
-        bg_color = tuple(int(background_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (255,)
-        edge_color = tuple(int(edge_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+        if not isinstance(background_color, str) or not background_color.startswith('#'):
+            background_color = "#000000"
+        
+        try:
+            bg_color = tuple(int(background_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (255,)
+        except ValueError:
+            bg_color = (0, 0, 0, 255)
+
+        try:
+            edge_color = tuple(int(edge_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+        except ValueError:
+            edge_color = (255, 255, 255)
 
         pil_image = image if isinstance(image, Image.Image) else Image.fromarray(np.clip(255. * image[0].cpu().numpy(), 0, 255).astype(np.uint8))
         original_image = np.array(pil_image)
@@ -181,15 +303,21 @@ class GeekyRemB:
         paste_x = x_position + (output_width - fg_image.width) // 2
         paste_y = y_position + (output_height - fg_image.height) // 2
 
-        fg_rgba = fg_image.convert("RGBA")
-        fg_with_opacity = Image.new("RGBA", fg_rgba.size, (0, 0, 0, 0))
-        for x in range(fg_rgba.width):
-            for y in range(fg_rgba.height):
-                r, g, b, a = fg_rgba.getpixel((x, y))
-                fg_with_opacity.putpixel((x, y), (r, g, b, int(a * opacity)))
+        # Apply blending mode
+        if background_mode == "image" and background_image is not None:
+            bg_array = np.array(result)
+            fg_array = np.array(fg_image)
+            blended = self.apply_blend_mode(bg_array, fg_array, blend_mode, opacity)
+            fg_with_opacity = Image.fromarray(blended)
+        else:
+            fg_rgba = fg_image.convert("RGBA")
+            fg_with_opacity = Image.new("RGBA", fg_rgba.size, (0, 0, 0, 0))
+            for x in range(fg_rgba.width):
+                for y in range(fg_rgba.height):
+                    r, g, b, a = fg_rgba.getpixel((x, y))
+                    fg_with_opacity.putpixel((x, y), (r, g, b, int(a * opacity)))
 
         fg_mask_with_opacity = fg_mask.point(lambda p: int(p * opacity))
-
         result.paste(fg_with_opacity, (paste_x, paste_y), fg_mask_with_opacity)
 
         if edge_detection:
@@ -218,55 +346,92 @@ class GeekyRemB:
 
         return result, fg_mask
 
-    def process_frame(self, frame, *args):
-        pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        processed_frame, _ = self.remove_background(pil_frame, *args)
+    def parse_color(self, color):
+        """Safely parse color string to RGB tuple"""
+        if isinstance(color, str) and color.startswith('#') and len(color) == 7:
+            try:
+                return tuple(int(color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+            except ValueError:
+                pass
+        return (0, 0, 0)  # Default to black if parsing fails
+
+    def process_frame(self, frame, background_frame=None, *args):
+        """Process a single video frame with proper color handling"""
+        if isinstance(frame, np.ndarray):
+            pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        else:
+            pil_frame = frame
+            
+        args = list(args)
+        
+        if len(args) > 9:  # Handle background color
+            bg_color = self.parse_color(args[9])
+            args[9] = f"#{bg_color[0]:02x}{bg_color[1]:02x}{bg_color[2]:02x}"
+        
+        if len(args) > 14:  # Handle edge color
+            edge_color = self.parse_color(args[14])
+            args[14] = f"#{edge_color[0]:02x}{edge_color[1]:02x}{edge_color[2]:02x}"
+            
+        if background_frame is not None:
+            if isinstance(background_frame, np.ndarray):
+                background_frame = Image.fromarray(cv2.cvtColor(background_frame, cv2.COLOR_BGR2RGB))
+        
+        args = tuple(args)
+        processed_frame, _ = self.remove_background(pil_frame, background_frame, *args)
         return cv2.cvtColor(np.array(processed_frame), cv2.COLOR_RGB2BGR)
 
     def process_video(self, input_path, output_path, background_video_path, *args):
-        cap = cv2.VideoCapture(input_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        if background_video_path:
-            bg_cap = cv2.VideoCapture(background_video_path)
-            bg_total_frames = int(bg_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        for frame_num in tqdm(range(total_frames), desc="Processing video"):
-            ret, frame = cap.read()
-            if not ret:
-                break
+        try:
+            cap = cv2.VideoCapture(input_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
+            bg_cap = None
             if background_video_path:
-                bg_frame_num = frame_num % bg_total_frames
-                bg_cap.set(cv2.CAP_PROP_POS_FRAMES, bg_frame_num)
-                bg_ret, bg_frame = bg_cap.read()
-                if bg_ret:
-                    bg_frame_resized = cv2.resize(bg_frame, (width, height))
-                    args = list(args)
-                    args[1] = Image.fromarray(cv2.cvtColor(bg_frame_resized, cv2.COLOR_BGR2RGB))
-                    args = tuple(args)
+                bg_cap = cv2.VideoCapture(background_video_path)
+                bg_total_frames = int(bg_cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
-            processed_frame = self.process_frame(frame, *args)
-            out.write(processed_frame)
-
-        cap.release()
-        if background_video_path:
-            bg_cap.release()
-        out.release()
-
-        # Convert output video to MP4 container
-        temp_output = output_path + "_temp.mp4"
-        os.rename(output_path, temp_output)
-        os.system(f"ffmpeg -i {temp_output} -c copy {output_path}")
-        os.remove(temp_output)
-
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+            
+            with tqdm(total=total_frames, desc="Processing video") as pbar:
+                frame_idx = 0
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                        
+                    bg_frame = None
+                    if bg_cap is not None:
+                        bg_frame_idx = frame_idx % bg_total_frames
+                        bg_cap.set(cv2.CAP_PROP_POS_FRAMES, bg_frame_idx)
+                        bg_ret, bg_frame = bg_cap.read()
+                        if bg_ret:
+                            bg_frame = cv2.resize(bg_frame, (width, height))
+                    
+                    processed_frame = self.process_frame(frame, bg_frame, *args)
+                    out.write(processed_frame)
+                    
+                    frame_idx += 1
+                    pbar.update(1)
+            
+            cap.release()
+            if bg_cap:
+                bg_cap.release()
+            out.release()
+            
+            # Convert output video to MP4 container
+            temp_output = output_path + "_temp.mp4"
+            os.rename(output_path, temp_output)
+            os.system(f'ffmpeg -i "{temp_output}" -c copy "{output_path}"')
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+                
+        except Exception as e:
+            print(f"Error processing video: {str(e)}")
+            raise
 
 def on_ui_tabs():
     with gr.Blocks(analytics_enabled=False) as geeky_remb_tab:
@@ -281,6 +446,15 @@ def on_ui_tabs():
 
                 with gr.Group():
                     gr.Markdown("### Foreground Adjustments")
+                    with gr.Group():
+                        blend_mode = gr.Dropdown(
+                            label="Blend Mode",
+                            choices=["normal", "multiply", "screen", "overlay", "soft_light", 
+                                    "hard_light", "difference", "exclusion", "color_dodge", "color_burn"],
+                            value="normal"
+                        )
+                        opacity = gr.Slider(label="Opacity", minimum=0.0, maximum=1.0, value=1.0, step=0.01)
+                    
                     foreground_scale = gr.Slider(label="Scale", minimum=0.1, maximum=5.0, value=1.0, step=0.1)
                     foreground_aspect_ratio = gr.Textbox(
                         label="Aspect Ratio",
@@ -290,9 +464,10 @@ def on_ui_tabs():
                     x_position = gr.Slider(label="X Position", minimum=-1000, maximum=1000, value=0, step=1)
                     y_position = gr.Slider(label="Y Position", minimum=-1000, maximum=1000, value=0, step=1)
                     rotation = gr.Slider(label="Rotation", minimum=-360, maximum=360, value=0, step=0.1)
-                    opacity = gr.Slider(label="Opacity", minimum=0.0, maximum=1.0, value=1.0, step=0.01)
-                    flip_horizontal = gr.Checkbox(label="Flip Horizontal", value=False)
-                    flip_vertical = gr.Checkbox(label="Flip Vertical", value=False)
+                    
+                    with gr.Row():
+                        flip_horizontal = gr.Checkbox(label="Flip Horizontal", value=False)
+                        flip_vertical = gr.Checkbox(label="Flip Vertical", value=False)
 
             with gr.Column(scale=1):
                 result_type = gr.Radio(["Image", "Video"], label="Output Type", value="Image")
@@ -359,20 +534,20 @@ def on_ui_tabs():
         def update_input_type(choice):
             return {
                 foreground_input: gr.update(visible=choice == "Image"),
-                foreground_video: gr.update(visible=choice == "Video"),
+                foreground_video: gr.update(visible=choice == "Video")
             }
 
         def update_output_type(choice):
             return {
                 result_image: gr.update(visible=choice == "Image"),
-                result_video: gr.update(visible=choice == "Video"),
+                result_video: gr.update(visible=choice == "Video")
             }
 
         def update_background_mode(mode):
             return {
                 background_color: gr.update(visible=mode == "color"),
                 background_image: gr.update(visible=mode == "image"),
-                background_video: gr.update(visible=mode == "video"),
+                background_video: gr.update(visible=mode == "video")
             }
 
         def update_custom_dimensions(use_custom):
@@ -394,24 +569,34 @@ def on_ui_tabs():
             geeky_remb.process_video(video_path, output_path, background_video_path, *args)
             return output_path
 
-        def run_geeky_remb(input_type, foreground_input, foreground_video, result_type, model, output_format, 
-                           alpha_matting, alpha_matting_foreground_threshold, alpha_matting_background_threshold, 
-                           post_process_mask, chroma_key, chroma_threshold, color_tolerance, background_mode, 
-                           background_color, background_image, background_video, invert_mask, feather_amount, 
-                           edge_detection, edge_thickness, edge_color, shadow, shadow_blur, shadow_opacity, 
-                           color_adjustment, brightness, contrast, saturation, x_position, y_position, rotation, 
-                           opacity, flip_horizontal, flip_vertical, mask_blur, mask_expansion, foreground_scale, 
-                           foreground_aspect_ratio, remove_background, image_format, video_format, video_quality,
-                           use_custom_dimensions, custom_width, custom_height, output_dimension_source):
+        def run_geeky_remb(input_type, foreground_input, foreground_video, result_type, model, 
+                          output_format, alpha_matting, alpha_matting_foreground_threshold,
+                          alpha_matting_background_threshold, post_process_mask, chroma_key,
+                          chroma_threshold, color_tolerance, background_mode, background_color,
+                          background_image, background_video, invert_mask, feather_amount,
+                          edge_detection, edge_thickness, edge_color, shadow, shadow_blur,
+                          shadow_opacity, color_adjustment, brightness, contrast, saturation,
+                          x_position, y_position, rotation, opacity, flip_horizontal,
+                          flip_vertical, mask_blur, mask_expansion, foreground_scale,
+                          foreground_aspect_ratio, remove_background, image_format,
+                          video_format, video_quality, use_custom_dimensions, custom_width,
+                          custom_height, output_dimension_source, blend_mode):
+            
+            if not isinstance(background_color, str) or not background_color.startswith('#'):
+                background_color = "#000000"
+            if not isinstance(edge_color, str) or not edge_color.startswith('#'):
+                edge_color = "#FFFFFF"
             
             args = (model, alpha_matting, alpha_matting_foreground_threshold,
-                    alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
-                    color_tolerance, background_mode, background_color, output_format,
-                    invert_mask, feather_amount, edge_detection, edge_thickness, edge_color, shadow, shadow_blur,
-                    shadow_opacity, color_adjustment, brightness, contrast, saturation, x_position,
-                    y_position, rotation, opacity, flip_horizontal, flip_vertical, mask_blur,
-                    mask_expansion, foreground_scale, foreground_aspect_ratio, remove_background,
-                    use_custom_dimensions, custom_width, custom_height, output_dimension_source)
+                   alpha_matting_background_threshold, post_process_mask, chroma_key,
+                   chroma_threshold, color_tolerance, background_mode, background_color,
+                   output_format, invert_mask, feather_amount, edge_detection,
+                   edge_thickness, edge_color, shadow, shadow_blur, shadow_opacity,
+                   color_adjustment, brightness, contrast, saturation, x_position,
+                   y_position, rotation, opacity, flip_horizontal, flip_vertical,
+                   mask_blur, mask_expansion, foreground_scale, foreground_aspect_ratio,
+                   remove_background, use_custom_dimensions, custom_width, custom_height,
+                   output_dimension_source, blend_mode)
 
             if input_type == "Image" and result_type == "Image":
                 result = process_image(foreground_input, background_image, *args)
@@ -424,7 +609,7 @@ def on_ui_tabs():
                 output_video = process_video(foreground_video, background_video if background_mode == "video" else None, *args)
                 if video_format != "MP4":
                     temp_output = output_video + f"_temp.{video_format.lower()}"
-                    os.system(f"ffmpeg -i {output_video} -c:v libx264 -crf {int(20 - (video_quality / 5))} {temp_output}")
+                    os.system(f'ffmpeg -i "{output_video}" -c:v libx264 -crf {int(20 - (video_quality / 5))} "{temp_output}"')
                     os.remove(output_video)
                     output_video = temp_output
                 return None, output_video
@@ -451,32 +636,176 @@ def on_ui_tabs():
                     with tempfile.NamedTemporaryFile(delete=False, suffix=f".{image_format.lower()}") as temp_file:
                         result.save(temp_file.name, format=image_format, quality=95 if image_format == "JPEG" else None)
                         return temp_file.name, None
-                else:
-                    return None, None
+                return None, None
 
         input_type.change(update_input_type, inputs=[input_type], outputs=[foreground_input, foreground_video])
         result_type.change(update_output_type, inputs=[result_type], outputs=[result_image, result_video])
-        background_mode.change(update_background_mode, inputs=[background_mode], outputs=[background_color, background_image, background_video])
-        use_custom_dimensions.change(update_custom_dimensions, inputs=[use_custom_dimensions], outputs=[custom_width, custom_height, output_dimension_source])
+        background_mode.change(update_background_mode, inputs=[background_mode], 
+                             outputs=[background_color, background_image, background_video])
+        use_custom_dimensions.change(update_custom_dimensions, inputs=[use_custom_dimensions], 
+                                   outputs=[custom_width, custom_height, output_dimension_source])
 
         run_button.click(
             fn=run_geeky_remb,
             inputs=[
                 input_type, foreground_input, foreground_video, result_type,
                 model, output_format, alpha_matting, alpha_matting_foreground_threshold,
-                alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
-                color_tolerance, background_mode, background_color, background_image, background_video,
-                invert_mask, feather_amount, edge_detection, edge_thickness, edge_color,
-                shadow, shadow_blur, shadow_opacity, color_adjustment, brightness, contrast,
-                saturation, x_position, y_position, rotation, opacity, flip_horizontal,
-                flip_vertical, mask_blur, mask_expansion, foreground_scale, foreground_aspect_ratio,
-                remove_background, image_format, video_format, video_quality,
-                use_custom_dimensions, custom_width, custom_height, output_dimension_source
+                alpha_matting_background_threshold, post_process_mask, chroma_key,
+                chroma_threshold, color_tolerance, background_mode, background_color,
+                background_image, background_video, invert_mask, feather_amount,
+                edge_detection, edge_thickness, edge_color, shadow, shadow_blur,
+                shadow_opacity, color_adjustment, brightness, contrast, saturation,
+                x_position, y_position, rotation, opacity, flip_horizontal,
+                flip_vertical, mask_blur, mask_expansion, foreground_scale,
+                foreground_aspect_ratio, remove_background, image_format, video_format,
+                video_quality, use_custom_dimensions, custom_width, custom_height,
+                output_dimension_source, blend_mode
             ],
             outputs=[result_image, result_video]
         )
 
     return [(geeky_remb_tab, "GeekyRemB", "geeky_remb_tab")]
 
+def on_ui_settings():
+    section = ("geeky-remb", "GeekyRemB")
+    shared.opts.add_option(
+        "geekyremb_saving_path",
+        shared.OptionInfo(
+            "outputs/geekyremb",
+            "GeekyRemB saving path",
+            gr.Textbox,
+            {"placeholder": "outputs/geekyremb"},
+            section=section
+        ),
+    )
+    shared.opts.add_option(
+        "geekyremb_max_video_length",
+        shared.OptionInfo(
+            300,
+            "Maximum video length in seconds",
+            gr.Number,
+            {"minimum": 1, "maximum": 3600},
+            section=section
+        ),
+    )
+    shared.opts.add_option(
+        "geekyremb_max_image_size",
+        shared.OptionInfo(
+            4096,
+            "Maximum image dimension",
+            gr.Number,
+            {"minimum": 512, "maximum": 8192},
+            section=section
+        ),
+    )
+
+def update_input_type(choice):
+    return {
+        foreground_input: gr.update(visible=choice == "Image"),
+        foreground_video: gr.update(visible=choice == "Video"),
+    }
+
+def update_output_type(choice):
+    return {
+        result_image: gr.update(visible=choice == "Image"),
+        result_video: gr.update(visible=choice == "Video"),
+    }
+
+def update_background_mode(mode):
+    return {
+        background_color: gr.update(visible=mode == "color"),
+        background_image: gr.update(visible=mode == "image"),
+        background_video: gr.update(visible=mode == "video"),
+    }
+
+def update_custom_dimensions(use_custom):
+    return {
+        custom_width: gr.update(visible=use_custom),
+        custom_height: gr.update(visible=use_custom),
+        output_dimension_source: gr.update(visible=not use_custom)
+    }
+
+def process_image(image, background_image, *args):
+    geeky_remb = GeekyRemB()
+    result, _ = geeky_remb.remove_background(image, background_image, *args)
+    return result
+
+def process_video(video_path, background_video_path, *args):
+    geeky_remb = GeekyRemB()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+        output_path = temp_file.name
+    geeky_remb.process_video(video_path, output_path, background_video_path, *args)
+    return output_path
+
+def run_geeky_remb(input_type, foreground_input, foreground_video, result_type, model, 
+                   output_format, alpha_matting, alpha_matting_foreground_threshold,
+                   alpha_matting_background_threshold, post_process_mask, chroma_key,
+                   chroma_threshold, color_tolerance, background_mode, background_color,
+                   background_image, background_video, invert_mask, feather_amount,
+                   edge_detection, edge_thickness, edge_color, shadow, shadow_blur,
+                   shadow_opacity, color_adjustment, brightness, contrast, saturation,
+                   x_position, y_position, rotation, opacity, flip_horizontal,
+                   flip_vertical, mask_blur, mask_expansion, foreground_scale,
+                   foreground_aspect_ratio, remove_background, image_format,
+                   video_format, video_quality, use_custom_dimensions, custom_width,
+                   custom_height, output_dimension_source, blend_mode):
+    
+    # Ensure color values are valid hex strings
+    if not isinstance(background_color, str) or not background_color.startswith('#'):
+        background_color = "#000000"
+    if not isinstance(edge_color, str) or not edge_color.startswith('#'):
+        edge_color = "#FFFFFF"
+    
+    args = (model, alpha_matting, alpha_matting_foreground_threshold,
+           alpha_matting_background_threshold, post_process_mask, chroma_key,
+           chroma_threshold, color_tolerance, background_mode, background_color,
+           output_format, invert_mask, feather_amount, edge_detection,
+           edge_thickness, edge_color, shadow, shadow_blur, shadow_opacity,
+           color_adjustment, brightness, contrast, saturation, x_position,
+           y_position, rotation, opacity, flip_horizontal, flip_vertical,
+           mask_blur, mask_expansion, foreground_scale, foreground_aspect_ratio,
+           remove_background, use_custom_dimensions, custom_width, custom_height,
+           output_dimension_source, blend_mode)
+
+    if input_type == "Image" and result_type == "Image":
+        result = process_image(foreground_input, background_image, *args)
+        if image_format != "PNG":
+            result = result.convert("RGB")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{image_format.lower()}") as temp_file:
+            result.save(temp_file.name, format=image_format, quality=95 if image_format == "JPEG" else None)
+            return temp_file.name, None
+    elif input_type == "Video" and result_type == "Video":
+        output_video = process_video(foreground_video, background_video if background_mode == "video" else None, *args)
+        if video_format != "MP4":
+            temp_output = output_video + f"_temp.{video_format.lower()}"
+            os.system(f'ffmpeg -i "{output_video}" -c:v libx264 -crf {int(20 - (video_quality / 5))} "{temp_output}"')
+            os.remove(output_video)
+            output_video = temp_output
+        return None, output_video
+    elif input_type == "Image" and result_type == "Video":
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+            output_path = temp_file.name
+        frame = cv2.cvtColor(np.array(foreground_input), cv2.COLOR_RGB2BGR)
+        height, width = frame.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, 24, (width, height))
+        for _ in range(24 * 5):  # 5 seconds at 24 fps
+            out.write(frame)
+        out.release()
+        return None, process_video(output_path, background_video if background_mode == "video" else None, *args)
+    elif input_type == "Video" and result_type == "Image":
+        cap = cv2.VideoCapture(foreground_video)
+        ret, frame = cap.read()
+        cap.release()
+        if ret:
+            pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            result = process_image(pil_frame, background_image, *args)
+            if image_format != "PNG":
+                result = result.convert("RGB")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{image_format.lower()}") as temp_file:
+                result.save(temp_file.name, format=image_format, quality=95 if image_format == "JPEG" else None)
+                return temp_file.name, None
+        return None, None
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
+script_callbacks.on_ui_settings(on_ui_settings)
