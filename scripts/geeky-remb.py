@@ -11,6 +11,9 @@ from modules.processing import StableDiffusionProcessing
 from modules.images import save_image
 import torch
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+import queue
+from threading import Thread
 
 class BlendMode:
     @staticmethod
@@ -105,6 +108,12 @@ class GeekyRemB:
         if "U2NET_HOME" not in os.environ:
             os.environ["U2NET_HOME"] = os.path.join(models_path, "u2net")
         self.processing = False
+        self.use_gpu = torch.cuda.is_available()
+        self.frame_cache = {}
+        self.max_cache_size = 100
+        self.batch_size = 4  # Adjust based on your memory constraints
+        self.max_workers = 4  # Adjust based on your CPU cores
+        self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         self.blend_modes = {
             "normal": BlendMode.normal,
             "multiply": BlendMode.multiply,
@@ -117,6 +126,118 @@ class GeekyRemB:
             "color_dodge": BlendMode.color_dodge,
             "color_burn": BlendMode.color_burn
         }
+
+    def process_frame_batch(self, frames, background_frames, *args):
+        """Process multiple frames in parallel"""
+        futures = []
+        for frame, bg_frame in zip(frames, background_frames):
+            future = self.executor.submit(self.process_frame, frame, bg_frame, *args)
+            futures.append(future)
+        return [future.result() for future in futures]
+
+    def process_video(self, input_path, output_path, background_video_path, *args):
+        try:
+            cap = cv2.VideoCapture(input_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            bg_cap = None
+            if background_video_path:
+                bg_cap = cv2.VideoCapture(background_video_path)
+                bg_total_frames = int(bg_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            frame_queue = queue.Queue(maxsize=self.batch_size * 2)
+            result_queue = queue.Queue()
+            
+            # Use GPU-accelerated codec if available
+            if self.use_gpu:
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            else:
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+            def read_frames():
+                frame_idx = 0
+                while frame_idx < total_frames:
+                    frames = []
+                    bg_frames = []
+                    for _ in range(self.batch_size):
+                        if frame_idx >= total_frames:
+                            break
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        
+                        bg_frame = None
+                        if bg_cap is not None:
+                            bg_frame_idx = frame_idx % bg_total_frames
+                            bg_cap.set(cv2.CAP_PROP_POS_FRAMES, bg_frame_idx)
+                            bg_ret, bg_frame = bg_cap.read()
+                            if bg_ret:
+                                bg_frame = cv2.resize(bg_frame, (width, height))
+                        
+                        frames.append(frame)
+                        bg_frames.append(bg_frame)
+                        frame_idx += 1
+                    
+                    if frames:
+                        frame_queue.put((frames, bg_frames))
+                frame_queue.put(None)
+
+            def process_frames():
+                while True:
+                    batch = frame_queue.get()
+                    if batch is None:
+                        result_queue.put(None)
+                        break
+                    frames, bg_frames = batch
+                    processed_frames = self.process_frame_batch(frames, bg_frames, *args)
+                    result_queue.put(processed_frames)
+
+            read_thread = Thread(target=read_frames)
+            process_thread = Thread(target=process_frames)
+            read_thread.start()
+            process_thread.start()
+
+            with tqdm(total=total_frames, desc="Processing video") as pbar:
+                while True:
+                    processed_batch = result_queue.get()
+                    if processed_batch is None:
+                        break
+                    for processed_frame in processed_batch:
+                        out.write(processed_frame)
+                        pbar.update(1)
+
+            read_thread.join()
+            process_thread.join()
+            cap.release()
+            if bg_cap:
+                bg_cap.release()
+            out.release()
+
+            # Optimize final video encoding
+            temp_output = output_path + "_temp.mp4"
+            os.rename(output_path, temp_output)
+            if self.use_gpu:
+                os.system(f'ffmpeg -y -i "{temp_output}" -c:v h264_nvenc -preset p7 -tune hq -crf 23 "{output_path}"')
+            else:
+                os.system(f'ffmpeg -y -i "{temp_output}" -c:v libx264 -preset faster -crf 23 "{output_path}"')
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+
+        except Exception as e:
+            print(f"Error processing video: {str(e)}")
+            raise
+
+        finally:
+            if 'cap' in locals():
+                cap.release()
+            if 'bg_cap' in locals():
+                bg_cap.release()
+            if 'out' in locals():
+                out.release()
 
     def apply_blend_mode(self, target, blend, mode="normal", opacity=1.0):
         if mode not in self.blend_modes:
@@ -208,16 +329,16 @@ class GeekyRemB:
         return new_width, new_height
 
     def remove_background(self, image, background_image, model, alpha_matting, alpha_matting_foreground_threshold, 
-                          alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
-                          color_tolerance, background_mode, background_color, output_format="RGBA", 
-                          invert_mask=False, feather_amount=0, edge_detection=False, 
-                          edge_thickness=1, edge_color="#FFFFFF", shadow=False, shadow_blur=5, 
-                          shadow_opacity=0.5, color_adjustment=False, brightness=1.0, contrast=1.0, 
-                          saturation=1.0, x_position=0, y_position=0, rotation=0, opacity=1.0, 
-                          flip_horizontal=False, flip_vertical=False, mask_blur=0, mask_expansion=0,
-                          foreground_scale=1.0, foreground_aspect_ratio=None, remove_bg=True,
-                          use_custom_dimensions=False, custom_width=None, custom_height=None,
-                          output_dimension_source="Foreground", blend_mode="normal"):
+                      alpha_matting_background_threshold, post_process_mask, chroma_key, chroma_threshold,
+                      color_tolerance, background_mode, background_color, output_format="RGBA", 
+                      invert_mask=False, feather_amount=0, edge_detection=False, 
+                      edge_thickness=1, edge_color="#FFFFFF", shadow=False, shadow_blur=5, 
+                      shadow_opacity=0.5, color_adjustment=False, brightness=1.0, contrast=1.0, 
+                      saturation=1.0, x_position=0, y_position=0, rotation=0, opacity=1.0, 
+                      flip_horizontal=False, flip_vertical=False, mask_blur=0, mask_expansion=0,
+                      foreground_scale=1.0, foreground_aspect_ratio=None, remove_bg=True,
+                      use_custom_dimensions=False, custom_width=None, custom_height=None,
+                      output_dimension_source="Foreground", blend_mode="normal"):
         if self.session is None or self.session.model_name != model:
             self.session = new_session(model)
 
@@ -307,8 +428,20 @@ class GeekyRemB:
         if background_mode == "image" and background_image is not None:
             bg_array = np.array(result)
             fg_array = np.array(fg_image)
+            
+            # Ensure foreground array matches background dimensions before blending
+            if bg_array.shape[:2] != fg_array.shape[:2]:
+                # Resize foreground image to match background dimensions
+                fg_image = fg_image.resize((output_width, output_height), Image.LANCZOS)
+                fg_mask = fg_mask.resize((output_width, output_height), Image.LANCZOS)
+                fg_array = np.array(fg_image)
+            
             blended = self.apply_blend_mode(bg_array, fg_array, blend_mode, opacity)
             fg_with_opacity = Image.fromarray(blended)
+            
+            # Update paste coordinates since we resized
+            paste_x = x_position
+            paste_y = y_position
         else:
             fg_rgba = fg_image.convert("RGBA")
             fg_with_opacity = Image.new("RGBA", fg_rgba.size, (0, 0, 0, 0))
@@ -317,7 +450,11 @@ class GeekyRemB:
                     r, g, b, a = fg_rgba.getpixel((x, y))
                     fg_with_opacity.putpixel((x, y), (r, g, b, int(a * opacity)))
 
+        # Ensure mask has same dimensions as image for pasting
         fg_mask_with_opacity = fg_mask.point(lambda p: int(p * opacity))
+        if fg_mask_with_opacity.size != fg_with_opacity.size:
+            fg_mask_with_opacity = fg_mask_with_opacity.resize(fg_with_opacity.size, Image.LANCZOS)
+
         result.paste(fg_with_opacity, (paste_x, paste_y), fg_mask_with_opacity)
 
         if edge_detection:
