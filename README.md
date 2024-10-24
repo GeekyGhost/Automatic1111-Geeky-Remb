@@ -6,6 +6,10 @@
 
 ---
 
+
+https://github.com/user-attachments/assets/d9e089f8-461e-4cfd-a216-5632c30709f6
+
+
 ## Key Features
 
 - **Multi-model Background Removal**: Supports `u2net`, `isnet-general-use`, and other models.
@@ -241,5 +245,9 @@ Feel free to submit pull requests or open issues with ideas, improvements, or bu
 With **GeekyRemB**, unlock new possibilities in creative projects. Whether you need to fine-tune images or apply advanced effects to videos, this extension empowers your workflow with precision and control.
 
 ---
+
+
+Uploading Recording 2024-10-23 231528.mp4…
+
 
 Happy creating! 🎨
